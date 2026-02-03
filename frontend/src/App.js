@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import './App.css';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || "https://daily-news-brief-generator.onrender.com/";
+const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
 const CATEGORY_ICONS = {
   'Technology': TrendingUp,
