@@ -206,7 +206,10 @@ def verify_password(password: str, hashed: str) -> bool:
 def create_session_token() -> str:
     """Generate secure session token"""
     return secrets.token_urlsafe(32)
-
+def smart_summarize(text: str) -> str:
+    """Extract first 2 key sentences"""
+    sentences = text.split('.')
+    return '. '.join(sentences[:2])
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Get current authenticated user"""
     token = credentials.credentials
