@@ -1,9 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { 
   Newspaper, 
   Settings, 
-  Calendar, 
   RefreshCw, 
   Loader, 
   Check,
@@ -15,7 +14,6 @@ import {
   Film,
   Landmark,
   LogOut,
-  User,
   Database
 } from 'lucide-react';
 import './App.css';
@@ -70,22 +68,25 @@ function App() {
       setIsAuthenticated(true);
       loadUserData(storedToken);
     }
-    
+
     fetchCategories();
-  }, []);
+  }, [loadUserData, fetchCategories]);
+
 
   useEffect(() => {
     if (isAuthenticated && preferences.segments.length > 0) {
       fetchNewsBrief();
     }
-  }, [isAuthenticated, preferences.segments, selectedDate, selectedCategory]);
+  }, [isAuthenticated, preferences.segments, fetchNewsBrief]);
+
 
   const getAuthHeaders = () => ({
     'Authorization': `Bearer ${token}`,
     'Content-Type': 'application/json'
   });
 
-  const loadUserData = async (authToken) => {
+ const loadUserData = useCallback(async (authToken) => {
+
     try {
       const response = await axios.get(`${API_BASE_URL}/me`, {
         headers: { 'Authorization': `Bearer ${authToken}` }
@@ -97,9 +98,9 @@ function App() {
       console.error('Error loading user data:', error);
       handleLogout();
     }
-  };
+  }, []);
 
-  const fetchCategories = async () => {
+  const fetchCategories = useCallback(async () => {
     try {
       const response = await axios.get(`${API_BASE_URL}/categories`);
       setCategories(response.data.categories);
@@ -107,7 +108,8 @@ function App() {
       console.error('Error fetching categories:', error);
       setCategories(['Technology', 'Business', 'Sports', 'Health', 'Entertainment', 'Politics']);
     }
-  };
+  }, []);
+
 
   const handleRegister = async (e) => {
     e.preventDefault();
@@ -192,7 +194,7 @@ function App() {
     }
   };
 
-  const fetchNewsBrief = async (forceRefresh = false) => {
+  const fetchNewsBrief = useCallback(async (forceRefresh = false) => {
     setLoading(true);
     try {
       const response = await axios.post(`${API_BASE_URL}/news-brief`, {
@@ -201,7 +203,8 @@ function App() {
         force_refresh: forceRefresh
       }, {
         headers: getAuthHeaders()
-      });
+      }, [selectedCategory, selectedDate, token]);
+
       
       setNewsBriefs(response.data.briefs);
     } catch (error) {
