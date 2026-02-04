@@ -85,13 +85,12 @@ function App() {
     'Content-Type': 'application/json'
   });
 
- const loadUserData = useCallback(async (authToken) => {
-
+  const loadUserData = useCallback(async (authToken) => {
     try {
       const response = await axios.get(`${API_BASE_URL}/me`, {
         headers: { 'Authorization': `Bearer ${authToken}` }
       });
-      
+
       setUser(response.data.user);
       setPreferences(response.data.preferences);
     } catch (error) {
@@ -99,6 +98,7 @@ function App() {
       handleLogout();
     }
   }, []);
+
 
   const fetchCategories = useCallback(async () => {
     try {
@@ -109,7 +109,6 @@ function App() {
       setCategories(['Technology', 'Business', 'Sports', 'Health', 'Entertainment', 'Politics']);
     }
   }, []);
-
 
   const handleRegister = async (e) => {
     e.preventDefault();
@@ -203,9 +202,8 @@ function App() {
         force_refresh: forceRefresh
       }, {
         headers: getAuthHeaders()
-      }, [selectedCategory, selectedDate, token]);
+      });
 
-      
       setNewsBriefs(response.data.briefs);
     } catch (error) {
       console.error('Error fetching news brief:', error);
@@ -216,7 +214,7 @@ function App() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedCategory, selectedDate, token]);
 
   const toggleSegment = (segment) => {
     if (isAuthenticated) {
