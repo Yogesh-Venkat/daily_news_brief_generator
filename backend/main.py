@@ -148,11 +148,19 @@ summarizer = None
 try:
     from transformers import pipeline
     print("Loading AI summarization model...")
-    summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+
+    summarizer = pipeline(
+        task="text2text-generation",
+        model="google/flan-t5-base",
+        device=-1  # force CPU
+    )
+
     print("AI model loaded successfully!")
+
 except Exception as e:
     print(f"AI model not available (using fallback): {e}")
     summarizer = None
+
 
 # News Sources Configuration
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
@@ -322,21 +330,29 @@ def summarize_text(text: str, max_length: int = 130) -> str:
     """Summarize text using AI model or fallback to extractive summary"""
     if not text or len(text) < 50:
         return text
-    
+
     try:
         if summarizer:
-            # Limit input length for model
             input_text = text[:1000]
-            result = summarizer(input_text, max_length=max_length, min_length=30, do_sample=False)
-            return result[0]['summary_text']
+
+            prompt = f"Summarize this news article clearly and concisely:\n{input_text}"
+
+            result = summarizer(
+                prompt,
+                max_new_tokens=120,
+                do_sample=False
+            )
+
+            return result[0]["generated_text"]
+
         else:
-            # Fallback: extractive summary (first 2 sentences)
+            # Fallback
             sentences = text.replace('!', '.').replace('?', '.').split('. ')
             summary = '. '.join(sentences[:2])
             return summary[:200] + '...' if len(summary) > 200 else summary
+
     except Exception as e:
         print(f"Summarization error: {e}")
-        # Last resort fallback
         sentences = text.split('. ')
         return sentences[0][:150] + '...' if len(sentences[0]) > 150 else sentences[0]
 
