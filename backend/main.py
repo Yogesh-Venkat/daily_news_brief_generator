@@ -6,19 +6,13 @@ from typing import List, Optional
 from datetime import datetime, timedelta
 import sqlite3
 import json
-import os
-from dotenv import load_dotenv
-import requests
 import feedparser
 import hashlib
 import secrets
 import re
 
-load_dotenv()
-
 app = FastAPI(title="Daily News Brief Generator")
 
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,114 +21,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Security
 security = HTTPBearer()
-
-# Database setup
 DB_PATH = "news_brief_01.db"
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            name TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_preferences (
-            user_id INTEGER PRIMARY KEY,
-            segments TEXT,
-            reading_preference TEXT DEFAULT 'short',
-            language TEXT DEFAULT 'en',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (id)
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            token TEXT PRIMARY KEY,
-            user_id INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            expires_at TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (id)
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS cached_news (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            category TEXT,
-            date TEXT,
-            articles TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            expires_at TIMESTAMP,
-            UNIQUE(category, date)
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_news_cache (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            category TEXT,
-            date TEXT,
-            brief TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (id),
-            UNIQUE(user_id, category, date)
-        )
-    """)
-    
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# Models
-class UserRegister(BaseModel):
-    email: EmailStr
-    password: str
-    name: str
-    segments: List[str]
-    reading_preference: Optional[str] = "short"
-    language: Optional[str] = "en"
-
-class UserLogin(BaseModel):
-    email: EmailStr
-    password: str
-
-class UserPreferences(BaseModel):
-    segments: List[str]
-    reading_preference: Optional[str] = "short"
-    language: Optional[str] = "en"
-
-class NewsBriefRequest(BaseModel):
-    category: Optional[str] = None
-    date: Optional[str] = None
-    force_refresh: Optional[bool] = False
-
-# News Sources Configuration
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
-GNEWS_API_KEY = os.getenv("GNEWS_API_KEY", "")
-
-CATEGORY_MAPPING = {
-    "Technology": "technology",
-    "Business": "business",
-    "Sports": "sports",
-    "Health": "health",
-    "Entertainment": "entertainment",
-    "Politics": "general"
-}
-
+# BBC RSS Feeds (Always work, no API key needed)
 RSS_FEEDS = {
     "Technology": ["https://feeds.bbci.co.uk/news/technology/rss.xml"],
     "Business": ["https://feeds.bbci.co.uk/news/business/rss.xml"],
@@ -144,7 +34,23 @@ RSS_FEEDS = {
     "Politics": ["https://feeds.bbci.co.uk/news/politics/rss.xml"]
 }
 
-# Helper functions
+# Models
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+class UserRegister(BaseModel):
+    email: EmailStr
+    password: str
+    name: str
+    segments: List[str]
+
+class NewsBriefRequest(BaseModel):
+    category: Optional[str] = None
+    date: Optional[str] = None
+    force_refresh: Optional[bool] = False
+
+# Helper Functions
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -175,384 +81,370 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     conn.close()
     
     if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
     
     return {"id": user[0], "email": user[1], "name": user[2]}
 
-def is_cache_valid(created_at_str: str, hours: int = 6) -> bool:
+def normalize_date(date_str: str) -> str:
+    """Normalize date to YYYY-MM-DD format"""
     try:
-        created_at = datetime.fromisoformat(created_at_str)
-        return datetime.now() - created_at < timedelta(hours=hours)
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        return dt.strftime("%Y-%m-%d")
     except:
-        return False
+        return datetime.now().strftime("%Y-%m-%d")
 
-def get_cached_news(category: str, date: str) -> Optional[List[dict]]:
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT articles FROM cached_news WHERE category = ? AND date = ? AND expires_at > datetime('now')", (category, date))
-        result = cursor.fetchone()
-        conn.close()
-        if result:
-            articles = json.loads(result[0])
-            # Return empty list if cached result is empty (means we already checked and found nothing)
-            return articles
-    except:
-        pass
-    return None
+def generate_cache_key(category: str, date: str) -> str:
+    """Generate unique cache key"""
+    key_string = f"{category}_{normalize_date(date)}"
+    return hashlib.md5(key_string.encode()).hexdigest()
 
-def cache_news(category: str, date: str, articles: List[dict], hours: int = 24):
-    # Cache for 24 hours (even if empty) to avoid repeated API calls for old dates
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        expires_at = datetime.now() + timedelta(hours=hours)
-        cursor.execute("INSERT OR REPLACE INTO cached_news (category, date, articles, expires_at) VALUES (?, ?, ?, ?)",
-                      (category, date, json.dumps(articles), expires_at))
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-def get_user_news_cache(user_id: int, category: str, date: str) -> Optional[dict]:
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT brief, created_at FROM user_news_cache WHERE user_id = ? AND category = ? AND date = ?",
-                      (user_id, category, date))
-        result = cursor.fetchone()
-        conn.close()
-        if result and is_cache_valid(result[1], hours=24):
-            return json.loads(result[0])
-    except:
-        pass
-    return None
-
-def cache_user_news(user_id: int, category: str, date: str, brief: dict):
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO user_news_cache (user_id, category, date, brief) VALUES (?, ?, ?, ?)",
-                      (user_id, category, date, json.dumps(brief)))
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-def smart_summarize(text: str, max_length: int = 200) -> str:
-    """Lightweight extractive summarization"""
-    if not text or len(text) < 50:
-        return text
-    text = re.sub(r'\s+', ' ', text).strip()
-    sentences = re.split(r'[.!?]+', text)
-    sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
-    if not sentences:
-        return text[:max_length]
-    summary = '. '.join(sentences[:2])
-    if len(summary) > max_length:
-        summary = summary[:max_length] + '...'
-    return summary
-
-def fetch_from_newsapi(category: str, date: str = None) -> List[dict]:
-    if not NEWS_API_KEY:
-        return []
-    try:
-        url = "https://newsapi.org/v2/top-headlines"
-        params = {"apiKey": NEWS_API_KEY, "category": CATEGORY_MAPPING.get(category, "general"), "language": "en", "pageSize": 10}
-        if date:
-            params["from"] = date
-            params["to"] = date
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            articles = []
-            for article in response.json().get("articles", []):
-                if article.get("title") and article.get("description"):
-                    articles.append({
-                        "title": article["title"],
-                        "description": article.get("description", ""),
-                        "url": article.get("url", ""),
-                        "source": article.get("source", {}).get("name", "NewsAPI"),
-                        "published_at": article.get("publishedAt", "")
-                    })
-            return articles
-    except:
-        pass
-    return []
-
-def fetch_from_gnews(category: str, date: str = None) -> List[dict]:
-    if not GNEWS_API_KEY:
-        return []
-    try:
-        url = "https://gnews.io/api/v4/top-headlines"
-        params = {"apikey": GNEWS_API_KEY, "category": CATEGORY_MAPPING.get(category, "general"), "lang": "en", "max": 10}
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            articles = []
-            for article in response.json().get("articles", []):
-                if article.get("title") and article.get("description"):
-                    articles.append({
-                        "title": article["title"],
-                        "description": article.get("description", ""),
-                        "url": article.get("url", ""),
-                        "source": article.get("source", {}).get("name", "GNews"),
-                        "published_at": article.get("publishedAt", "")
-                    })
-            return articles
-    except:
-        pass
-    return []
-
-def fetch_from_rss(category: str) -> List[dict]:
+def fetch_from_bbc_rss(category: str) -> List[dict]:
+    """Fetch news from BBC RSS feeds"""
+    print(f"\n→ Fetching from BBC RSS for {category}...")
     articles = []
+    
     for feed_url in RSS_FEEDS.get(category, []):
         try:
+            print(f"  Parsing: {feed_url}")
             feed = feedparser.parse(feed_url)
-            for entry in feed.entries[:5]:
-                articles.append({
-                    "title": entry.get("title", ""),
-                    "description": entry.get("summary", entry.get("description", "No description")),
-                    "url": entry.get("link", ""),
-                    "source": feed.feed.get("title", "RSS Feed"),
-                    "published_at": entry.get("published", "")
-                })
-        except:
-            pass
+            
+            if not feed.entries:
+                print(f"  ✗ No entries found")
+                continue
+            
+            for entry in feed.entries[:10]:
+                try:
+                    # Parse published date
+                    pub_date = entry.get("published", "")
+                    
+                    articles.append({
+                        "title": entry.get("title", "No Title"),
+                        "description": entry.get("summary", entry.get("description", "No description available")),
+                        "url": entry.get("link", ""),
+                        "source": feed.feed.get("title", "BBC News"),
+                        "published_at": pub_date,
+                        "category": category
+                    })
+                except Exception as e:
+                    print(f"  ✗ Error parsing entry: {e}")
+                    continue
+            
+            print(f"  ✓ Fetched {len(articles)} articles")
+            
+        except Exception as e:
+            print(f"  ✗ Error fetching feed: {e}")
+            continue
+    
     return articles
 
-def aggregate_news(category: str, date: str = None, use_cache: bool = True) -> tuple[List[dict], bool]:
-    """
-    Aggregate news from multiple sources with caching
-    Returns: (articles_list, is_date_too_old)
-    """
-    target_date = date or datetime.now().strftime("%Y-%m-%d")
-    
-    # Check if date is too old (more than 7 days for free tier APIs)
+def get_cached_news(category: str, date: str) -> Optional[List[dict]]:
+    """Get cached news with proper date handling"""
     try:
-        date_obj = datetime.strptime(target_date, "%Y-%m-%d")
-        days_old = (datetime.now() - date_obj).days
-        is_too_old = days_old > 7
-    except:
-        days_old = 0
-        is_too_old = False
+        normalized_date = normalize_date(date)
+        cache_key = generate_cache_key(category, normalized_date)
+        
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Try with cache_key first (new schema)
+        cursor.execute("""
+            SELECT articles, datetime(created_at) as created
+            FROM cached_news 
+            WHERE cache_key = ? AND expires_at > datetime('now')
+        """, (cache_key,))
+        
+        result = cursor.fetchone()
+        
+        # Fallback to old schema (category + date)
+        if not result:
+            cursor.execute("""
+                SELECT articles, datetime(created_at) as created
+                FROM cached_news 
+                WHERE category = ? AND date = ? AND expires_at > datetime('now')
+            """, (category, normalized_date))
+            result = cursor.fetchone()
+        
+        conn.close()
+        
+        if result:
+            articles = json.loads(result[0])
+            created_time = result[1]
+            print(f"✓ Cache HIT: {category} on {normalized_date} ({len(articles)} articles, cached at {created_time})")
+            return articles
+        
+        print(f"✗ Cache MISS: {category} on {normalized_date}")
+        return None
+        
+    except Exception as e:
+        print(f"Cache retrieval error: {e}")
+        return None
+
+def save_to_cache(category: str, date: str, articles: List[dict], hours: int = 6):
+    """Save news to cache with both old and new schema support"""
+    try:
+        normalized_date = normalize_date(date)
+        cache_key = generate_cache_key(category, normalized_date)
+        expires_at = datetime.now() + timedelta(hours=hours)
+        
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Check if cache_key column exists
+        cursor.execute("PRAGMA table_info(cached_news)")
+        columns = [col[1] for col in cursor.fetchall()]
+        
+        if 'cache_key' in columns:
+            # New schema
+            cursor.execute("""
+                INSERT OR REPLACE INTO cached_news 
+                (cache_key, category, date, articles, article_count, expires_at) 
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (cache_key, category, normalized_date, json.dumps(articles), len(articles), expires_at))
+        else:
+            # Old schema
+            cursor.execute("""
+                INSERT OR REPLACE INTO cached_news 
+                (category, date, articles, expires_at) 
+                VALUES (?, ?, ?, ?)
+            """, (category, normalized_date, json.dumps(articles), expires_at))
+        
+        conn.commit()
+        conn.close()
+        
+        print(f"✓ Cached: {category} on {normalized_date} ({len(articles)} articles, expires in {hours}h)")
+        
+    except Exception as e:
+        print(f"Cache save error: {e}")
+
+def aggregate_news_from_bbc(category: str, date: str, use_cache: bool = True) -> List[dict]:
+    """
+    Aggregate news from BBC RSS with caching
+    RSS feeds show latest news regardless of date, so we filter by date
+    """
+    target_date = normalize_date(date)
+    
+    print(f"\n{'='*60}")
+    print(f"Fetching news for: {category} on {target_date}")
+    print(f"Use cache: {use_cache}")
+    print(f"{'='*60}")
     
     # Check cache first
     if use_cache:
         cached = get_cached_news(category, target_date)
-        if cached is not None:  # Found in cache (even if empty)
-            print(f"Using cached news for {category} on {target_date} ({len(cached)} articles)")
-            return cached, is_too_old
+        if cached is not None:
+            return cached
     
-    # If date is too old, don't even try APIs (save quota)
-    if is_too_old:
-        print(f"Date {target_date} is too old ({days_old} days). Caching empty result.")
-        cache_news(category, target_date, [])
-        return [], True
+    # Fetch from BBC RSS
+    articles = fetch_from_bbc_rss(category)
     
-    print(f"Fetching fresh news for {category} on {target_date}")
-    all_articles = []
-    
-    # Fetch from APIs
-    all_articles.extend(fetch_from_newsapi(category, date))
-    all_articles.extend(fetch_from_gnews(category, date))
-    
-    # Only fetch RSS for current date (RSS doesn't support historical)
-    if days_old <= 1:
-        all_articles.extend(fetch_from_rss(category))
+    if not articles:
+        print(f"✗ No articles fetched for {category}")
+        # Cache empty result to avoid repeated fetches
+        save_to_cache(category, target_date, [])
+        return []
     
     # Remove duplicates
     unique_articles = []
     seen_titles = set()
-    for article in all_articles:
-        title_lower = article["title"].lower()[:50]
-        if title_lower not in seen_titles:
-            seen_titles.add(title_lower)
+    
+    for article in articles:
+        title_key = article["title"].lower()[:50]
+        if title_key not in seen_titles:
+            seen_titles.add(title_key)
             unique_articles.append(article)
     
-    final_articles = unique_articles[:15]
+    print(f"✓ Total unique articles: {len(unique_articles)}")
     
-    # Cache the results (even if empty)
-    cache_news(category, target_date, final_articles)
+    # Cache the results
+    save_to_cache(category, target_date, unique_articles)
     
-    return final_articles, is_too_old
+    return unique_articles
 
-def create_consolidated_summary(articles: List[dict], category: str, date: str, is_too_old: bool) -> str:
-    """Create a consolidated summary for the category"""
+def create_summary(articles: List[dict], category: str) -> str:
+    """Create consolidated summary"""
     if not articles:
-        if is_too_old:
-            return f"📅 No news available for {category} on {date}.\n\nHistorical news is not available with free tier APIs (limited to last 7 days).\n\nPlease select a more recent date."
-        else:
-            return f"📅 No news available for {category} on {date}.\n\nTry refreshing or selecting a different date."
+        return f"No news available for {category} at this time."
     
-    key_points = []
-    for article in articles[:5]:
-        title = article.get("title", "")
-        if title:
-            key_points.append(f"• {title}")
+    highlights = []
+    for i, article in enumerate(articles[:5], 1):
+        highlights.append(f"• {article['title']}")
     
-    summary = f"{category} Highlights:\n\n" + "\n".join(key_points)
-    sources = set(article.get("source", "Unknown") for article in articles)
-    summary += f"\n\nSources: {', '.join(list(sources)[:5])}"
+    summary = f"{category} Highlights:\n\n" + "\n\n".join(highlights)
+    summary += f"\n\nSources: BBC News"
+    
     return summary
 
 # API Endpoints
 @app.get("/")
-def read_root():
-    return {"message": "Daily News Brief Generator API", "version": "2.0", "memory_optimized": True}
-
-@app.get("/categories")
-def get_categories():
-    return {"categories": list(CATEGORY_MAPPING.keys())}
-
-@app.post("/register")
-def register_user(user: UserRegister):
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM users WHERE email = ?", (user.email,))
-        if cursor.fetchone():
-            conn.close()
-            raise HTTPException(status_code=400, detail="Email already registered")
-        password_hash = hash_password(user.password)
-        cursor.execute("INSERT INTO users (email, password_hash, name) VALUES (?, ?, ?)", (user.email, password_hash, user.name))
-        user_id = cursor.lastrowid
-        cursor.execute("INSERT INTO user_preferences (user_id, segments, reading_preference, language) VALUES (?, ?, ?, ?)",
-                      (user_id, json.dumps(user.segments), user.reading_preference, user.language))
-        token = create_session_token()
-        expires_at = datetime.now() + timedelta(days=30)
-        cursor.execute("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)", (token, user_id, expires_at))
-        conn.commit()
-        conn.close()
-        return {"message": "User registered successfully", "token": token, "user": {"id": user_id, "email": user.email, "name": user.name}}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def root():
+    return {
+        "message": "Daily News Brief Generator - BBC RSS Edition",
+        "version": "2.0",
+        "sources": "BBC News RSS Feeds"
+    }
 
 @app.post("/login")
-def login_user(credentials: UserLogin):
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, email, name, password_hash FROM users WHERE email = ?", (credentials.email,))
-        user = cursor.fetchone()
-        if not user or not verify_password(credentials.password, user[3]):
-            conn.close()
-            raise HTTPException(status_code=401, detail="Invalid email or password")
-        token = create_session_token()
-        expires_at = datetime.now() + timedelta(days=30)
-        cursor.execute("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)", (token, user[0], expires_at))
-        conn.commit()
-        conn.close()
-        return {"message": "Login successful", "token": token, "user": {"id": user[0], "email": user[1], "name": user[2]}}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/me")
-def get_current_user_info(current_user: dict = Depends(get_current_user)):
+def login(credentials: UserLogin):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT segments, reading_preference, language FROM user_preferences WHERE user_id = ?", (current_user["id"],))
-    prefs = cursor.fetchone()
-    conn.close()
-    if prefs:
-        return {"user": current_user, "preferences": {"segments": json.loads(prefs[0]), "reading_preference": prefs[1], "language": prefs[2]}}
-    return {"user": current_user, "preferences": {"segments": [], "reading_preference": "short", "language": "en"}}
-
-@app.post("/logout")
-def logout_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM sessions WHERE token = ?", (credentials.credentials,))
-        conn.commit()
+    
+    cursor.execute("SELECT id, email, name, password_hash FROM users WHERE email = ?", 
+                  (credentials.email,))
+    user = cursor.fetchone()
+    
+    if not user or not verify_password(credentials.password, user[3]):
         conn.close()
-    except:
-        pass
-    return {"message": "Logged out successfully"}
-
-@app.put("/preferences")
-def update_preferences(preferences: UserPreferences, current_user: dict = Depends(get_current_user)):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO user_preferences (user_id, segments, reading_preference, language, updated_at) VALUES (?, ?, ?, ?, datetime('now'))",
-                  (current_user["id"], json.dumps(preferences.segments), preferences.reading_preference, preferences.language))
-    cursor.execute("DELETE FROM user_news_cache WHERE user_id = ?", (current_user["id"],))
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    token = create_session_token()
+    expires_at = datetime.now() + timedelta(days=30)
+    
+    cursor.execute("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)",
+                  (token, user[0], expires_at))
     conn.commit()
     conn.close()
-    return {"message": "Preferences updated successfully", "preferences": preferences}
+    
+    return {
+        "token": token,
+        "user": {"id": user[0], "email": user[1], "name": user[2]}
+    }
+
+@app.post("/register")
+def register(user: UserRegister):
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT id FROM users WHERE email = ?", (user.email,))
+    if cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    password_hash = hash_password(user.password)
+    cursor.execute("INSERT INTO users (email, password_hash, name) VALUES (?, ?, ?)",
+                  (user.email, password_hash, user.name))
+    user_id = cursor.lastrowid
+    
+    cursor.execute("""
+        INSERT INTO user_preferences (user_id, segments) 
+        VALUES (?, ?)
+    """, (user_id, json.dumps(user.segments)))
+    
+    token = create_session_token()
+    expires_at = datetime.now() + timedelta(days=30)
+    cursor.execute("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)",
+                  (token, user_id, expires_at))
+    
+    conn.commit()
+    conn.close()
+    
+    return {
+        "token": token,
+        "user": {"id": user_id, "email": user.email, "name": user.name}
+    }
+
+@app.get("/me")
+def get_me(current_user: dict = Depends(get_current_user)):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT segments FROM user_preferences WHERE user_id = ?", 
+                  (current_user["id"],))
+    prefs = cursor.fetchone()
+    conn.close()
+    
+    segments = json.loads(prefs[0]) if prefs else ["Technology"]
+    
+    return {
+        "user": current_user,
+        "preferences": {"segments": segments}
+    }
 
 @app.post("/news-brief")
 def get_news_brief(request: NewsBriefRequest, current_user: dict = Depends(get_current_user)):
+    """Get news brief from BBC RSS"""
+    
+    # Get user preferences
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT segments FROM user_preferences WHERE user_id = ?", (current_user["id"],))
+    cursor.execute("SELECT segments FROM user_preferences WHERE user_id = ?", 
+                  (current_user["id"],))
     row = cursor.fetchone()
+    conn.close()
+    
     categories = json.loads(row[0]) if row else ["Technology", "Business"]
+    
+    # Override with specific category if requested
     if request.category:
         categories = [request.category]
-    target_date = request.date if request.date else datetime.now().strftime("%Y-%m-%d")
+    
+    target_date = normalize_date(request.date or datetime.now().strftime("%Y-%m-%d"))
     
     briefs = []
     for category in categories:
-        try:
-            # Check user cache first
-            if not request.force_refresh:
-                cached_brief = get_user_news_cache(current_user["id"], category, target_date)
-                if cached_brief:
-                    cached_brief["cached"] = True
-                    briefs.append(cached_brief)
-                    continue
-            
-            # Fetch news
-            articles, is_too_old = aggregate_news(category, target_date, use_cache=not request.force_refresh)
-            
-            # Process articles
-            processed_articles = []
-            for article in articles:
-                processed_articles.append({
-                    "title": article["title"],
-                    "description": article["description"],
-                    "url": article["url"],
-                    "source": article["source"],
-                    "published_at": article["published_at"],
-                    "summary": smart_summarize(article.get("description", ""))
-                })
-            
-            # Create brief (even if empty)
-            brief = {
-                "category": category,
-                "date": target_date,
-                "articles": processed_articles,
-                "consolidated_summary": create_consolidated_summary(processed_articles, category, target_date, is_too_old),
-                "cached": False,
-                "no_news_available": len(processed_articles) == 0
-            }
-            
-            # Cache the brief
-            cache_user_news(current_user["id"], category, target_date, brief)
-            briefs.append(brief)
-        except:
-            continue
+        print(f"\n{'='*60}")
+        print(f"Processing: {category}")
+        print(f"{'='*60}")
+        
+        # Fetch news
+        articles = aggregate_news_from_bbc(
+            category,
+            target_date,
+            use_cache=not request.force_refresh
+        )
+        
+        # Create brief
+        brief = {
+            "category": category,
+            "date": target_date,
+            "articles": articles[:10],
+            "consolidated_summary": create_summary(articles, category),
+            "cached": not request.force_refresh,
+            "no_news_available": len(articles) == 0
+        }
+        
+        briefs.append(brief)
     
-    conn.close()
-    return {"user": current_user["name"], "date": target_date, "briefs": briefs, "generated_at": datetime.now().isoformat()}
+    return {
+        "user": current_user["name"],
+        "date": target_date,
+        "briefs": briefs,
+        "generated_at": datetime.now().isoformat()
+    }
 
 @app.delete("/clear-cache")
 def clear_cache(current_user: dict = Depends(get_current_user)):
     conn = get_db()
     cursor = conn.cursor()
+    cursor.execute("DELETE FROM cached_news")
     cursor.execute("DELETE FROM user_news_cache WHERE user_id = ?", (current_user["id"],))
-    cursor.execute("DELETE FROM cached_news")  # Also clear global cache
     conn.commit()
+    count = cursor.rowcount
     conn.close()
-    return {"message": "Cache cleared successfully"}
+    
+    return {"message": f"Cleared {count} cache entries"}
 
-@app.get("/health")
-def health_check():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat(), "memory_optimized": True}
+@app.get("/cache-stats")
+def cache_stats():
+    """Debug endpoint to see cache contents"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT category, date, article_count, 
+               datetime(created_at, 'localtime') as created,
+               datetime(expires_at, 'localtime') as expires
+        FROM cached_news 
+        ORDER BY created_at DESC 
+        LIMIT 20
+    """)
+    
+    cache_entries = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    
+    return {
+        "total_entries": len(cache_entries),
+        "entries": cache_entries
+    }
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
