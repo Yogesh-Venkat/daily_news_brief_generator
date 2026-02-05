@@ -44,7 +44,6 @@ RSS_FEEDS = {
 
 def init_db():
     """Initialize database with all required tables"""
-    print("\n🔧 Initializing database...")
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -83,20 +82,37 @@ def init_db():
         )
     """)
     
-    # Cached news table (stores seeded historical data)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS cached_news (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cache_key TEXT,
-            category TEXT,
-            date TEXT,
-            articles TEXT,
-            article_count INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            expires_at TIMESTAMP,
-            UNIQUE(category, date)
-        )
-    """)
+    # Cached news table - check if it exists first
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='cached_news'")
+    table_exists = cursor.fetchone()
+    
+    if not table_exists:
+        # Create new table with all columns
+        cursor.execute("""
+            CREATE TABLE cached_news (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cache_key TEXT,
+                category TEXT,
+                date TEXT,
+                articles TEXT,
+                article_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP,
+                UNIQUE(category, date)
+            )
+        """)
+    else:
+        # Add missing columns to existing table
+        cursor.execute("PRAGMA table_info(cached_news)")
+        columns = [col[1] for col in cursor.fetchall()]
+        
+        if 'cache_key' not in columns:
+            cursor.execute("ALTER TABLE cached_news ADD COLUMN cache_key TEXT")
+            print("  ✓ Added cache_key column")
+        
+        if 'article_count' not in columns:
+            cursor.execute("ALTER TABLE cached_news ADD COLUMN article_count INTEGER DEFAULT 0")
+            print("  ✓ Added article_count column")
     
     # User news cache table
     cursor.execute("""
@@ -112,14 +128,22 @@ def init_db():
         )
     """)
     
-    # Create indexes for performance
+    # Create indexes (only if columns exist)
+    cursor.execute("PRAGMA table_info(cached_news)")
+    columns = [col[1] for col in cursor.fetchall()]
+    
+    # Always safe indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_cached_news_date ON cached_news(date DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_cached_news_category_date ON cached_news(category, date DESC)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cached_news_cache_key ON cached_news(cache_key)")
+    
+    # Conditional index
+    if 'cache_key' in columns:
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cached_news_cache_key ON cached_news(cache_key)")
     
     conn.commit()
     conn.close()
     print("✅ Database initialized successfully!")
+
 
 # Initialize database on startup
 init_db()
