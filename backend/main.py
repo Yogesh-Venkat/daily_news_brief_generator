@@ -31,7 +31,7 @@ app.add_middleware(
 security = HTTPBearer()
 
 # Database setup
-DB_PATH = "news_brief.db"
+DB_PATH = "news_brief_01.db"
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
