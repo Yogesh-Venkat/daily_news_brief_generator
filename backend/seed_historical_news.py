@@ -224,7 +224,7 @@ def bulk_insert_articles(category: str, date: str, articles: list):
         conn.close()
 
 
-def seed_historical_data(days_back: int = 14):
+def seed_historical_data(days_back: int = 2):
     """
     Seed historical news data for the past N days [web:11]
     

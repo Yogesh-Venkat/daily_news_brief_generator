@@ -10,4 +10,4 @@ python-dotenv==1.0.0
 requests==2.31.0
 feedparser==6.0.10
 python-multipart==0.0.6
-
+feedparser
