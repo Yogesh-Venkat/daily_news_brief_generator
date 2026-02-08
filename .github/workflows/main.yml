@@ -2,15 +2,14 @@ name: Daily News Sync
 
 on:
   schedule:
-    # Run daily at 2:00 AM UTC (7:30 AM IST)
-    - cron: '0 2 * * *'
-  workflow_dispatch:  # Allow manual trigger
+    - cron: '0 2 * * *'  # 2 AM UTC = 7:30 AM IST
+  workflow_dispatch:
   push:
     branches:
-      - master  # Changed from 'main' to match your repo
+      - master  # Change to master if that's your main branch
     paths:
       - 'backend/seed_historical_news.py'
-      - '.github/workflows/sync-news.yml'
+      - '.github/workflows/**'
 
 jobs:
   sync-news:
@@ -20,7 +19,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
       
       - name: Set up Python
@@ -33,11 +31,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests feedparser python-dotenv
       
-      - name: Verify script exists
+      - name: Debug - Check directory structure
         run: |
-          ls -la backend/
-          echo "Checking if seed script exists..."
-          test -f backend/seed_historical_news.py && echo "✓ Script found" || echo "✗ Script not found"
+          echo "📂 Root directory:"
+          ls -la
+          echo ""
+          echo "📂 Backend directory:"
+          ls -la backend/ || echo "No backend folder"
+          echo ""
+          echo "🔍 Looking for seed script:"
+          find . -name "seed_historical_news.py" -type f
       
       - name: Run news seeding script
         env:
@@ -45,27 +48,31 @@ jobs:
           GNEWS_API_KEY: ${{ secrets.GNEWS_API_KEY }}
         run: |
           cd backend
-          echo "📰 Starting news sync for $(date +'%Y-%m-%d')..."
-          python seed_historical_news.py --days 1 || echo "⚠️ Seeding failed but continuing..."
+          echo "📰 Running news sync for $(date +'%Y-%m-%d')..."
+          python seed_historical_news.py --days 1
       
-      - name: Check database changes
-        id: check_changes
+      - name: Check database status
         run: |
           cd backend
           if [ -f news_brief_01.db ]; then
-            echo "✓ Database file exists"
+            echo "✅ Database exists"
             ls -lh news_brief_01.db
-            echo "has_changes=true" >> $GITHUB_OUTPUT
+            sqlite3 news_brief_01.db "SELECT COUNT(*) as total FROM cached_news;" || echo "Cannot query database"
           else
-            echo "✗ Database file not found"
-            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "❌ Database not found!"
+            exit 1
           fi
       
-      - name: Commit and push if database changed
-        if: steps.check_changes.outputs.has_changes == 'true'
+      - name: Commit and push database changes
         run: |
           cd backend
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add news_brief_01.db
-          git diff --quiet && git diff --staged --quiet || (git commit -m "🤖 Auto-update: Daily news sync $(date +'%Y-%m-%d')" && git push)
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "🤖 Auto-update: Daily news sync $(date +'%Y-%m-%d %H:%M:%S UTC')"
+            git push
+            echo "✅ Database updated and pushed"
+          fi
