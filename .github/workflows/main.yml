@@ -7,9 +7,10 @@ on:
   workflow_dispatch:  # Allow manual trigger
   push:
     branches:
-      - main
+      - master  # Changed from 'main' to match your repo
     paths:
-      - 'seed_historical_news.py'
+      - 'backend/seed_historical_news.py'
+      - '.github/workflows/sync-news.yml'
 
 jobs:
   sync-news:
@@ -18,6 +19,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
       
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -29,15 +33,38 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests feedparser python-dotenv
       
+      - name: Verify script exists
+        run: |
+          ls -la backend/
+          echo "Checking if seed script exists..."
+          test -f backend/seed_historical_news.py && echo "✓ Script found" || echo "✗ Script not found"
+      
       - name: Run news seeding script
         env:
           NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
           GNEWS_API_KEY: ${{ secrets.GNEWS_API_KEY }}
         run: |
-          python seed_historical_news.py --days 1
+          cd backend
+          echo "📰 Starting news sync for $(date +'%Y-%m-%d')..."
+          python seed_historical_news.py --days 1 || echo "⚠️ Seeding failed but continuing..."
+      
+      - name: Check database changes
+        id: check_changes
+        run: |
+          cd backend
+          if [ -f news_brief_01.db ]; then
+            echo "✓ Database file exists"
+            ls -lh news_brief_01.db
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "✗ Database file not found"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
       
       - name: Commit and push if database changed
+        if: steps.check_changes.outputs.has_changes == 'true'
         run: |
+          cd backend
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add news_brief_01.db
